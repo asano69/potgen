@@ -1,7 +1,10 @@
 // seed -> hash -> parameters -> bezier curve -> svg
 
+import { type Dna, resolve } from "./params";
+import { type Pt, f } from "./svg";
+
 // Each parameter is normalized to 0..1 and mapped to [min, max] in drawing units.
-export const PARAM_SPECS = {
+export const SHAPE_SPECS = {
   neckHeight: { label: "Neck height", min: 20, max: 90 },
   neckWidth: { label: "Neck half-width", min: 10, max: 35 },
   lipWidth: { label: "Lip half-width", min: 12, max: 45 },
@@ -13,49 +16,44 @@ export const PARAM_SPECS = {
   handleSize: { label: "Handle size", min: 8, max: 28 },
 } as const;
 
-export type ParamKey = keyof typeof PARAM_SPECS;
-export const PARAM_KEYS = Object.keys(PARAM_SPECS) as ParamKey[];
+// Normalized values (0..1) for every shape parameter.
+export type ShapeDna = Dna<typeof SHAPE_SPECS>;
 
-// Normalized values (0..1) for every parameter.
-export type Dna = Record<ParamKey, number>;
-
-// FNV-1a string hash.
-function hash(str: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-// mulberry32 PRNG.
-function rng(seed: number): () => number {
-  let a = seed;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+// Resolved parameters plus the derived heights shared by the outline and the decoration.
+export function geometry(dna: ShapeDna) {
+  const v = resolve(SHAPE_SPECS, dna);
+  const yFoot = v.neckHeight + v.bodyHeight;
+  return {
+    ...v,
+    lipH: v.neckHeight * 0.15,
+    yBelly: v.neckHeight + v.bodyHeight * v.bellyPos,
+    yFoot,
+    yBottom: yFoot + v.footHeight,
   };
 }
+export type Geometry = ReturnType<typeof geometry>;
 
-// Sample a DNA around the given means. variation is 0..1.
-export function makeDna(seed: string, means: Dna, variation: number): Dna {
-  const rand = rng(hash(seed));
-  const dna = {} as Dna;
-  for (const k of PARAM_KEYS) {
-    const v = means[k] + (rand() - 0.5) * variation;
-    dna[k] = Math.min(1, Math.max(0, v));
-  }
-  return dna;
+// Right half of the profile, from lip to base.
+export function profile(g: Geometry): Pt[] {
+  return [
+    [g.lipWidth, 0],
+    [g.neckWidth, g.lipH],
+    [g.neckWidth, g.neckHeight],
+    [g.bodyWidth, g.yBelly],
+    [g.footWidth, g.yFoot],
+    [g.footWidth, g.yBottom],
+  ];
 }
 
-type Pt = [number, number];
-
-function value(dna: Dna, k: ParamKey): number {
-  const { min, max } = PARAM_SPECS[k];
-  return min + (max - min) * dna[k];
+// Half-width at height y, interpolated linearly between the profile points.
+// The real outline is a smooth curve, so this is only an estimate (decoration is clipped to the outline).
+export function halfWidthAt(pts: Pt[], y: number): number {
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[i + 1];
+    if (y >= y0 && y <= y1) return y1 === y0 ? Math.max(x0, x1) : x0 + ((x1 - x0) * (y - y0)) / (y1 - y0);
+  }
+  return 0;
 }
 
 // Catmull-Rom spline through pts, emitted as cubic bezier segments (no initial M).
@@ -73,36 +71,9 @@ function smooth(pts: Pt[]): string {
   return d;
 }
 
-function f(n: number): string {
-  return n.toFixed(1);
-}
-
-// Returns SVG path data (body outline and handles) for the DNA. y grows downward.
-export function amphoraPaths(dna: Dna): { body: string; handles: string } {
-  const neckH = value(dna, "neckHeight");
-  const neckW = value(dna, "neckWidth");
-  const lipW = value(dna, "lipWidth");
-  const bodyW = value(dna, "bodyWidth");
-  const bodyH = value(dna, "bodyHeight");
-  const belly = value(dna, "bellyPos");
-  const footW = value(dna, "footWidth");
-  const footH = value(dna, "footHeight");
-  const handle = value(dna, "handleSize");
-
-  const lipH = neckH * 0.15;
-  const yBelly = neckH + bodyH * belly;
-  const yFoot = neckH + bodyH;
-  const yBottom = yFoot + footH;
-
-  // Right half of the profile, from lip to base.
-  const right: Pt[] = [
-    [lipW, 0],
-    [neckW, lipH],
-    [neckW, neckH],
-    [bodyW, yBelly],
-    [footW, yFoot],
-    [footW, yBottom],
-  ];
+// Returns SVG path data (body outline and handles) for the geometry. y grows downward.
+export function amphoraPaths(g: Geometry): { body: string; handles: string } {
+  const right = profile(g);
   // Left half is the mirror image, walked from base back up to the lip.
   const left: Pt[] = right.map(([x, y]): Pt => [-x, y]).reverse();
 
@@ -114,9 +85,11 @@ export function amphoraPaths(dna: Dna): { body: string; handles: string } {
     " Z";
 
   // Loop handles from the neck down to the shoulder, on both sides.
-  const yTop = neckH * 0.35;
-  const yJoin = neckH + bodyH * belly * 0.35;
-  const xJoin = (neckW + bodyW) / 2;
+  const neckW = g.neckWidth;
+  const handle = g.handleSize;
+  const yTop = g.neckHeight * 0.35;
+  const yJoin = g.neckHeight + g.bodyHeight * g.bellyPos * 0.35;
+  const xJoin = (neckW + g.bodyWidth) / 2;
   const side = (s: number) =>
     `M${f(s * neckW)},${f(yTop)} C${f(s * (neckW + handle))},${f(yTop - handle * 0.3)} ` +
     `${f(s * (xJoin + handle))},${f(yJoin - handle)} ${f(s * xJoin)},${f(yJoin)}`;
