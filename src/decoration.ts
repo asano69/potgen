@@ -8,12 +8,15 @@ import { type Pt, poly } from "./svg";
 
 // Motif parameters select a motif from the library (0..1 -> index); the others are plain quantities.
 export const DECO_SPECS = {
-  neckMotif: { label: "Neck motif", min: 0, max: 1, choices: MOTIF_NAMES },
-  shoulderMotif: { label: "Shoulder motif", min: 0, max: 1, choices: MOTIF_NAMES },
-  bodyMotif: { label: "Body motif", min: 0, max: 1, choices: MOTIF_NAMES },
-  footMotif: { label: "Foot motif", min: 0, max: 1, choices: MOTIF_NAMES },
-  density: { label: "Density (tiles per band height)", min: 0.6, max: 2.4 },
+  mainMotif: { label: "Main band motif", min: 0, max: 1, choices: MOTIF_NAMES },
+  accentMotifA: { label: "Accent motif A", min: 0, max: 1, choices: MOTIF_NAMES },
+  accentMotifB: { label: "Accent motif B", min: 0, max: 1, choices: MOTIF_NAMES },
+  bandCount: { label: "Band count", min: 1, max: 6 },
+  bandStart: { label: "Band position (0=top, 1=bottom)", min: 0, max: 1 },
+  bandSpread: { label: "Band spread (0=packed, 1=even)", min: 0, max: 1 },
   bandHeight: { label: "Band height", min: 8, max: 26 },
+  mainScale: { label: "Main band scale", min: 1, max: 4 },
+  density: { label: "Density (tiles per band height)", min: 0.6, max: 2.4 },
   lineWeight: { label: "Line weight", min: 0.8, max: 2.4 },
   ruleCount: { label: "Rules between bands", min: 0, max: 2 },
   vineAngle: { label: "Vine angle (degrees)", min: 12, max: 45 },
@@ -34,7 +37,7 @@ export type Decoration = {
 
 const CLAY = "#c4673a";
 const DARK = "#2b1a12";
-const GAP = 7; // space between bands, where the rules go
+const GAP = 7; // minimum space between bands, where the rules go
 
 // Widest half-width of the profile within a band.
 function bandHalfWidth(pts: Pt[], y0: number, y1: number): number {
@@ -55,23 +58,37 @@ function rules(pts: Pt[], y0: number, y1: number, count: number, weight: number)
   return d;
 }
 
+type Band = { y0: number; y1: number; motif: number };
+
+// Stacks the bands between top and bottom, from top to bottom.
+// The middle band is the main one (taller); the others alternate between the two accent motifs
+// by their distance from it. Bands shrink if they do not fit; leftover space goes into the gaps
+// (bandSpread) and the margins above and below (bandStart).
+function layout(top: number, bottom: number, v: DecoDna): Band[] {
+  const n = Math.round(v.bandCount);
+  const main = Math.floor(n / 2);
+  const heights = Array.from({ length: n }, (_, i) => v.bandHeight * (i === main ? v.mainScale : 1));
+  const total = heights.reduce((a, b) => a + b, 0);
+  const room = bottom - top - (n - 1) * GAP;
+  const k = Math.min(1, room / total);
+  const free = room - total * k;
+  const spread = n > 1 ? v.bandSpread : 0;
+  const gap = GAP + (n > 1 ? (free * spread) / (n - 1) : 0);
+  let y = top + free * (1 - spread) * v.bandStart;
+  return heights.map((h, i) => {
+    const y0 = y;
+    y += h * k;
+    const motif = i === main ? v.mainMotif : Math.abs(i - main) % 2 === 1 ? v.accentMotifA : v.accentMotifB;
+    const band = { y0, y1: y, motif };
+    y += gap;
+    return band;
+  });
+}
+
 export function decorate(g: Geometry, dna: DecoDna): Decoration {
   const v = resolve(DECO_SPECS, dna);
   const pts = profile(g);
-  const t = v.bandHeight;
-
-  // Bands from top to bottom: neck, shoulder, body, foot.
-  const neckY0 = g.lipH + 3;
-  const shoulderY0 = g.neckHeight + 4;
-  const shoulderY1 = shoulderY0 + t;
-  const footY1 = g.yFoot - 2;
-  const footY0 = footY1 - t * 0.8;
-  const bands = [
-    { y0: neckY0, y1: Math.min(neckY0 + t, g.neckHeight - 3), motif: v.neckMotif },
-    { y0: shoulderY0, y1: shoulderY1, motif: v.shoulderMotif },
-    { y0: shoulderY1 + GAP, y1: footY0 - GAP, motif: v.bodyMotif },
-    { y0: footY0, y1: footY1, motif: v.footMotif },
-  ];
+  const bands = layout(g.lipH + 3, g.yFoot - 2, v);
 
   const opts = { angle: v.vineAngle, depth: Math.round(v.vineDepth) };
   let fills = "";
